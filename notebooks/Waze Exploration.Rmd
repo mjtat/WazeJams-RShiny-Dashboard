@@ -1,0 +1,221 @@
+---
+title: "Waze Leaflet Exploration"
+output: 
+  md_document:
+    variant: markdown_github
+always_allow_html: yes
+---
+
+### Import the relevant libraries and odbc connectors.
+
+```{r}
+library(RODBC)
+library(tidyverse)
+library(leaflet)
+library(rgdal)
+library(lubridate)
+library(stringr)
+source('/home/michelle/michelle.tat@boston.gov/Work Projects/Waze Dashboard/dashboard/data_wrangling.R')
+source('/home/michelle/michelle.tat@boston.gov/Work Projects/Waze Dashboard/dashboard/aggregation.R')
+source('/home/michelle/michelle.tat@boston.gov/Work Projects/Waze Dashboard/dashboard/plotting.R')
+```
+
+### Create a database connection.
+```{r}
+conn <- odbcDriverConnect(conn_string)
+
+```
+
+### Get a list of streets and end nodes.
+```{r}
+jam_streets <- read_csv('/home/michelle/michelle.tat@boston.gov/Work Projects/Waze Dashboard/dashboard/data/jam_streets.csv')
+```
+
+### Define street names
+```{r}
+street_name <- 'Washington St'
+an_end_node <- 'South St'
+```
+
+### Define month, day and year.
+```{r}
+selected_month <- 'Oct'
+selected_day <- 20
+selected_year <- 2017
+```
+
+
+### Create a query to retrieve 
+```{r}
+custom_query <- sprintf("SELECT DISTINCT jam.city,
+jam.street,
+jam.endNode,
+jam.speed,
+jam.delay,
+jam.startTime AS startTime,
+jam.endTime AS endTime,
+jam.uuid
+FROM Waze.dbo.Waze_JamData AS jam
+WHERE city = 'Boston, MA' and street = '%s' and jam.endNode = '%s' and jam.startTime >= '2017-01-01 00:00:00' and jam.startTime <= '2017-12-31 00:00:00'
+ORDER BY startTime ASC", street_name, an_end_node)
+```
+
+### Run the query
+```{r}
+waze_query <- sqlQuery(conn, custom_query)
+```
+
+### Get x-y coordinate to plot later
+```{r}
+street_coordinate <- sqlQuery(conn, sprintf("SELECT TOP 30 jam.street, 
+                              jam.endNode, 
+                              point.x, 
+                              point.y
+                              FROM dbo.Waze_JamData AS jam
+                              INNER JOIN dbo.Waze_PointData AS point
+                              ON jam.uuid=point.uuid
+                              WHERE jam.street='%s' and jam.endNode = '%s'", street_name, an_end_node))
+```
+  
+### Dedupe logic:
+### uuids are indicators of a jam, usually last < 1hr
+### lots of empty uuids, so we have to figure out the nature of those entries
+### group entries that are approx an hour apart
+### assign uuids to those entries 
+### re-add them to origin df
+```{r}
+city <- as.vector(waze_query$city[1])
+street <- as.vector(waze_query$street[1])
+endNode <- as.vector(waze_query$endNode[1])
+
+empty_uuids <- waze_query %>% filter(uuid == '') %>% mutate(time_diff = endTime - startTime, 
+                                                                     month_startTime = month(startTime), 
+                                                                     day_startTime = day(startTime),
+                                                                     hour_startTime = hour(startTime),
+                                                                     minute_startTime = minute(startTime),
+                                                                     month_endTime = month(endTime), 
+                                                                     day_endTime = day(endTime),
+                                                                     hour_endTime = hour(endTime),
+                                                                     minute_endTime = minute(endTime),
+                                                                     start_end_diff = hour_endTime - hour_startTime)
+
+empty_uuids <- empty_uuids %>% group_by(day_startTime, hour_startTime) %>% 
+                              summarise(count = n(),
+                              speed = mean(speed, na.rm=TRUE),
+                              delay = mean(delay, na.rm=TRUE),
+                              startTime = min(startTime),
+                              endTime = max(endTime)) %>%
+                              mutate(n_jams = 1,
+                                     city = city,
+                                     street=street,
+                                     endNode=endNode)
+                  
+
+empty_uuids$uuid <- sample(100000000000, size = nrow(empty_uuids), replace=TRUE)
+
+empty_uuids <- empty_uuids %>% ungroup(day_startTime) %>% select(-day_startTime)
+
+
+empty_uuids <- empty_uuids %>% ungroup(day_startTime, hour_startTime) %>% 
+  select(city, street, endNode, uuid, count, n_jams, speed, delay, startTime, endTime) %>%
+  mutate(uuid = as.character(uuid))
+
+```
+
+```{r}
+examine_dedupe <- waze_query %>% 
+                  filter(uuid != '') %>%
+                  group_by(city, street, endNode, uuid) %>% 
+                  summarise(count = n(),
+                            n_jams = 1,
+                            speed = mean(speed, na.rm=TRUE),
+                            delay = mean(delay, na.rm=TRUE),
+                            startTime = min(startTime), 
+                            endTime = max(endTime)) %>%
+                  mutate(uuid = as.character(uuid))
+```  
+
+```{r}
+waze_deduped <- examine_dedupe %>% bind_rows(empty_uuids)
+```
+
+
+```{r}
+  waze_deduped <- waze_deduped %>%
+    mutate(startTime=ymd_hms(startTime, tz = 'EDT')) %>%
+    mutate(month=month(startTime, label = TRUE)) %>%
+    mutate(day=day(startTime)) %>%
+    mutate(weekday = wday(startTime, label = TRUE)) %>%
+    mutate(hour=hour(startTime)) %>%
+    mutate(year=year(startTime)) %>%
+    mutate(week=week(startTime))
+```
+
+
+### Dedupe the waze data
+```{r}
+waze_deduped <- dedupe_and_format_waze(waze_query)
+```
+
+### Subset waze data to selected month and day.
+```{r}
+waze_df <- to_month_and_day(waze_deduped, selected_month, selected_day)
+
+```
+
+### Get daily information for a specific day. This creates a df grouped by hour.
+```{r}
+
+waze_daily <- aggregate_daily_metrics(waze_df)
+
+```
+
+### Aggregate daily information, as well as aggregate daily information over the year (e.g., all Mondays).
+### Spits out a dataframe with both pieces of information.
+```{r}
+waze_daily_avg <- aggregate_daily_average(waze_deduped, waze_daily, selected_month, selected_day)
+```
+
+### Gets all information for the day of interest, and all n number of days back (e.g., 7 days, 14 days, 21 days)
+```{r}
+the_year = 2017
+the_day = '30'
+the_month = 'Nov'
+the_date <- paste0(the_year, '-', the_month, '-', the_day)
+the_date <- as.character(ymd(the_date))
+waze_monthly <- aggregate_month_metrics(waze_deduped, origin_date = the_date, 21)
+```
+
+
+### Creates a barplot of specific waze metrics
+```{r}
+barplot_waze_metrics(waze_daily, 
+                     waze_daily$hour_of_day, 
+                     waze_daily$n_waze_reported_jams,  
+                     'Hour of Day', 
+                     'Number of Reported Jams')
+```
+### Create a barplot of daily vs annual jams
+```{r}
+barplot_waze_metrics(waze_daily_avg,
+                     waze_daily_avg$category,
+                     waze_daily_avg$mean_total_jams,
+                     'Daily or Annual',
+                     'Number of Jams')
+```
+
+### Create a lineplot of historical waze info
+```{r}
+lineplot_waze_metrics(waze_monthly,
+                      waze_monthly$date_label,
+                      waze_monthly$n_waze_reported_jams,
+                      "Date",
+                      "Number of Reported Jams")
+```
+
+
+### Create a leaflet map indicate the corridor of interest.
+```{r}
+leaflet(street_coordinate) %>% addPolylines(lng=~x, lat=~y, opacity = 1, noClip=TRUE, stroke=1) %>% addProviderTiles(providers$Stamen.Toner)
+```
+
