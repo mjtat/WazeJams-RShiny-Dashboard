@@ -26,6 +26,9 @@ All viz is completed using ggplot2 (which can be easily converted to plotly or\
 some other more interactive visualization library). 
 
 Additionally, the back end data wrangling script organizes the data in such a way
-that you can do some basic time series forecasting. This was an add-on I was planning
-once the MVP of this dashboard was completed.
+that you can do some basic time series forecasting, specifically using the well known
+`forecast` library. I did some exploratory analysis (not in repo) using Facebooks newer
+library, `prophet`.
+
+This was an add-on I was planning once the MVP of this dashboard was completed. 
 
