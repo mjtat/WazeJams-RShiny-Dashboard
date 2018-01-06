@@ -28,4 +28,4 @@ some other more interactive visualization library).
 Additionally, the back end data wrangling script organizes the data in such a way
 that you can do some basic time series forecasting. This was an add-on I was planning
 once the MVP of this dashboard was completed.
-# WazeJams-RShiny-Dashboard
+
